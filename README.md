@@ -3,7 +3,7 @@
 Un mod para Claude Code que muestra el trabajo de los agentes como una familia de cangrejos Claude en pixel-art.
 
 - **Uso restante (arriba del panel)**: barras retro de lo que queda de la sesión (5 h), la semana y Fable, con cuándo se reinicia cada una. Los bloques que se pierden estallan en píxeles.
-- **Árbol de agentes (panel lateral "🦀 Agentes")**: crece hacia abajo, una fila por agente, cada subagente colgando de quien lo lanzó con un conector de su color. Cada cangrejo se anima según su estado: trabajando, esperando, terminado (salta y ✓ verde) o fallido (gris, ojos en X). Los subagentes trabajan con una notebook (tecleando) o con una lupa (los Explore). Claude principal se ve más cansado a medida que se agota el límite semanal.
+- **Árbol de agentes (panel lateral "🦀 Agentes")**: crece hacia abajo, una fila por agente, cada subagente colgando de quien lo lanzó con un conector de su color. Los cangrejos siguen el estilo del personaje de Claude Code: un bloque naranja con ojos alargados, bracitos y cuatro patitas. Cada uno se anima según su estado: trabajando (rebota, camina y parpadea), esperando, terminado (salta con los brazos arriba y ✓ verde) o fallido (gris, ojos en X). Los subagentes teclean con las dos manos en una notebook, y los Explore sostienen una lupa frente al ojo, que se ve agrandado, con dos rutinas distintas. Claude principal se ve más cansado a medida que se agota el límite semanal.
 - **Uso por agente**: encima de cada cangrejo, tokens, costo aproximado y herramientas, con una barra retro y un mini cangrejo.
 - **Banda sobre el cuadro de texto**: tiempo restante estimado, porcentaje, tiempo transcurrido y costo, con una barra retro que se llena poco a poco y un cangrejito caminando al frente.
 

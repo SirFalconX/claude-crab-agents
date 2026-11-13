@@ -1,6 +1,6 @@
 {
   "name": "crab-agents",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Árbol de agentes con cangrejos Claude animados, barra de progreso sobre el prompt y tiempo/costo aproximado del trabajo de los agentes.",
   "types": "./types/index.d.ts"
 }
