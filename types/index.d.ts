@@ -7,6 +7,8 @@ export type CrabAgent = {
   type: string
   description: string
   model: string
+  /** Reasoning effort of its latest model request; '' until one is seen. */
+  effort: string
   status: CrabStatus
   startedAt: number
   endedAt: number | null
@@ -28,6 +30,9 @@ export type CrabRun = {
   mainTools: number
   mainRawUsd: number
   mainTokens: number
+  /** Main loop's model and effort, from its latest model request. */
+  mainModel: string
+  mainEffort: string
   /** The main loop's task list (update_plan / TodoWrite), when it keeps one. */
   planTotal: number
   planDone: number

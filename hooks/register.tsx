@@ -10,8 +10,8 @@ const PANE_TITLE = '🦀 Agentes'
 
 // Change a shape tag when that value's fields change: it declines what an
 // earlier version stored, which outlives a reload.
-const agentsA = atom({ plugin: 'crab-agents', key: 'agents' } as const, [], { shape: 'agents-1' })
-const runA = atom({ plugin: 'crab-agents', key: 'run' } as const, null, { shape: 'run-3' })
+const agentsA = atom({ plugin: 'crab-agents', key: 'agents' } as const, [], { shape: 'agents-2' })
+const runA = atom({ plugin: 'crab-agents', key: 'run' } as const, null, { shape: 'run-4' })
 const tickA = atom(
   { plugin: 'crab-agents', key: 'tick' } as const,
   { now: 0, costUsd: null, factor: 1, limits: [] },
@@ -33,6 +33,9 @@ const S = {
   spawnParent: new Map<string, string>(),
   /** The bar never moves back within a run. */
   shownFrac: { runId: '', frac: 0 },
+  /** Main loop's last seen model and effort, carried into each new run. */
+  mainModel: '',
+  mainEffort: '',
   /** Blocks each limit's bar held last time, and when it last lost some. */
   lastBlocks: new Map<string, number>(),
   drops: new Map<string, { at: number; from: number; to: number }>(),
@@ -189,6 +192,8 @@ async function newRun($: $T): Promise<CrabRun> {
     mainTools: 0,
     mainRawUsd: 0,
     mainTokens: 0,
+    mainModel: S.mainModel,
+    mainEffort: S.mainEffort,
     planTotal: 0,
     planDone: 0,
     stepStartedAt: now,
@@ -315,6 +320,22 @@ function propFor(type: string): CrabProp {
   return /explore|search|research/i.test(type) ? 'magnifier' : 'laptop'
 }
 
+/** `claude-opus-5-5` → `Opus 5.5`; anything else as given, without a date suffix. */
+function modelName(id: string): string {
+  const m = /^(?:claude-)?([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[.*\])?$/i.exec(id.trim())
+  if (!m) return id.replace(/-\d{8}$/, '')
+  const family = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase()
+  return `${family} ${m[2]}${m[3] ? '.' + m[3] : ''}`
+}
+
+const EFFORT_WORD: Record<string, string> = { low: 'bajo', medium: 'medio', high: 'alto', xhigh: 'muy alto', max: 'máximo' }
+
+/** "(Opus 5.5 · alto)"; '' when nothing is known yet. */
+function modelMeta(model: string, effort: string): string {
+  const parts = [model ? modelName(model) : '', effort ? (EFFORT_WORD[effort] ?? effort) : ''].filter(Boolean)
+  return parts.length > 0 ? `(${parts.join(' · ')})` : ''
+}
+
 async function view($: $T) {
   const run = await read($, runA)
   const agents = await read($, agentsA)
@@ -387,6 +408,7 @@ export const register: Register = on => {
       type: e.subagentType,
       description: e.description || clip(e.prompt, 40),
       model: res.model,
+      effort: '',
       status: 'running',
       startedAt: now,
       endedAt: null,
@@ -424,6 +446,17 @@ export const register: Register = on => {
   })
 
   on('turn.step', async function* ($, e, next) {
+    const effort = e.effort === undefined ? '' : String(e.effort)
+    if (e.agentId !== undefined) {
+      const id = e.agentId
+      void update($, agentsA, list =>
+        list.map(a => (a.id === id && (a.model !== e.model || a.effort !== effort) ? { ...a, model: e.model, effort } : a)),
+      )
+    } else if (S.mainModel !== e.model || S.mainEffort !== effort) {
+      S.mainModel = e.model
+      S.mainEffort = effort
+      void update($, runA, run => (run ? { ...run, mainModel: e.model, mainEffort: effort } : run))
+    }
     const r = yield* next(e)
     const u = r.usage
     if (u) {
@@ -558,6 +591,7 @@ export const register: Register = on => {
       parentId: null,
       title: 'Claude',
       subtitle: S.mainBusy ? 'principal · trabajando' : v.anyActive ? 'principal · esperando' : 'principal',
+      meta: modelMeta(v.run?.mainModel ?? S.mainModel, v.run?.mainEffort ?? S.mainEffort),
       color: MAIN_COLOR,
       state: v.run ? mainState : 'idle',
       opts: { tired: tiredness(v.t.limits) },
@@ -566,6 +600,7 @@ export const register: Register = on => {
       id: a.id,
       parentId: a.parentId,
       title: a.type,
+      meta: modelMeta(a.model, a.effort),
       subtitle: a.description,
       color: a.color,
       state: a.status as CrabState,
@@ -668,7 +703,7 @@ export const register: Register = on => {
           <Box flexDirection="row" gap={1}>
             <Text color={MAIN_COLOR}>●</Text>
             <Text bold>Claude</Text>
-            <Text dimColor>principal</Text>
+            <Text dimColor>principal {modelMeta(v.run?.mainModel ?? S.mainModel, v.run?.mainEffort ?? S.mainEffort)}</Text>
           </Box>
           <Text dimColor wrap="truncate-end">
             {'   '}
@@ -700,6 +735,7 @@ export const register: Register = on => {
                     <Text bold color={a.color}>
                       {a.type}
                     </Text>
+                    <Text dimColor>{modelMeta(a.model, a.effort)}</Text>
                     <Box flexShrink={1}>
                       <Text wrap="truncate-end">{a.description}</Text>
                     </Box>

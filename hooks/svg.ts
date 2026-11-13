@@ -240,6 +240,8 @@ export type TreeNode = {
   id: string
   parentId: string | null
   title: string
+  /** Shown after the title, smaller: model and effort. */
+  meta?: string
   subtitle: string
   color: string
   state: CrabState
@@ -253,7 +255,7 @@ const INDENT = 56
 const RH = 104
 const CRAB_W = 44
 const CRAB_H = 32
-const TEXT_W = 230
+const TEXT_W = 310
 
 /**
  * A retro segmented bar with its top-left at (x, y): the usage line on top,
@@ -348,7 +350,7 @@ export function treeSvg(root: TreeNode, nodes: TreeNode[]): { source: string; wi
       return (
         stripe +
         crab(r.x, r.y, r.scale, r.node.color, r.node.state, delay, r.node.opts) +
-        `<text x="${tx}" y="${rowTop + 24}" font-size="${r.depth === 0 ? 16 : 14}" font-weight="700" fill="${titleColor}">${esc(clip(r.node.title, textRoom))}</text>` +
+        `<text x="${tx}" y="${rowTop + 24}" font-size="${r.depth === 0 ? 16 : 14}" font-weight="700" fill="${titleColor}">${esc(clip(r.node.title, textRoom))}${r.node.meta ? `<tspan font-size="12" font-weight="500" fill="#8a8a8a" dx="6">${esc(r.node.meta)}</tspan>` : ''}</text>` +
         `<text x="${tx}" y="${rowTop + 42}" font-size="12" fill="#8a8a8a">${esc(clip(r.node.subtitle, textRoom + 4))}</text>` +
         usage
       )
