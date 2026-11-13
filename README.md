@@ -2,8 +2,10 @@
 
 Un mod para Claude Code que muestra el trabajo de los agentes como una familia de cangrejos Claude en pixel-art.
 
-- **Árbol de agentes (panel lateral "🦀 Agentes")**: Claude principal arriba y cada subagente colgando de quien lo lanzó, con su propio color. Cada cangrejo se anima según su estado: trabajando (rebota, mueve patas y pinzas), esperando (respira y mira a los lados), terminado (salta, ojos felices y ✓ verde) o fallido (gris, ojos en X). Debajo, cada agente muestra su tarea, la herramienta que usa ahora, tiempo, costo aproximado y tokens.
-- **Banda sobre el cuadro de texto**: barra de progreso con un tramo por agente y un cangrejito que avanza, más `3/5 agentes · ⏱ 1m 05s · ~$0.42` y la actividad actual.
+- **Uso restante (arriba del panel)**: barras retro de lo que queda de la sesión (5 h), la semana y Fable, con cuándo se reinicia cada una. Los bloques que se pierden estallan en píxeles.
+- **Árbol de agentes (panel lateral "🦀 Agentes")**: crece hacia abajo, una fila por agente, cada subagente colgando de quien lo lanzó con un conector de su color. Cada cangrejo se anima según su estado: trabajando, esperando, terminado (salta y ✓ verde) o fallido (gris, ojos en X). Los subagentes trabajan con una notebook (tecleando) o con una lupa (los Explore). Claude principal se ve más cansado a medida que se agota el límite semanal.
+- **Uso por agente**: encima de cada cangrejo, tokens, costo aproximado y herramientas, con una barra retro y un mini cangrejo.
+- **Banda sobre el cuadro de texto**: tiempo restante estimado, porcentaje, tiempo transcurrido y costo, con una barra retro que se llena poco a poco y un cangrejito caminando al frente.
 
 El panel se abre solo cuando Claude lanza el primer subagente de cada trabajo; también con el comando `/cangrejos` o el botón 🦀 Árbol de la banda.
 

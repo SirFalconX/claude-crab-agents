@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelUsage, Register, RenderNode } from 'claude-code'
 
-import type { CrabAgent, CrabRun, CrabStatus, CrabTick } from '../types'
-import { MAIN_COLOR, PALETTE, clip, progressSvg, treeSvg } from './svg'
-import type { CrabState, Segment, TreeNode } from './svg'
+import type { CrabAgent, CrabLimit, CrabRun, CrabStatus, CrabTick } from '../types'
+import { LIMIT_BLOCKS, MAIN_COLOR, PALETTE, clip, fillSvg, limitsSvg, treeSvg } from './svg'
+import type { CrabProp, CrabState, LimitRow, TreeNode } from './svg'
 
 const PANE = 'crab-agents'
 const PANE_TITLE = '🦀 Agentes'
@@ -11,11 +11,11 @@ const PANE_TITLE = '🦀 Agentes'
 // Change a shape tag when that value's fields change: it declines what an
 // earlier version stored, which outlives a reload.
 const agentsA = atom({ plugin: 'crab-agents', key: 'agents' } as const, [], { shape: 'agents-1' })
-const runA = atom({ plugin: 'crab-agents', key: 'run' } as const, null, { shape: 'run-1' })
+const runA = atom({ plugin: 'crab-agents', key: 'run' } as const, null, { shape: 'run-3' })
 const tickA = atom(
   { plugin: 'crab-agents', key: 'tick' } as const,
-  { now: 0, costUsd: null, factor: 1 },
-  { shape: 'tick-1' },
+  { now: 0, costUsd: null, factor: 1, limits: [] },
+  { shape: 'tick-2' },
 )
 const hiddenA = atom({ plugin: 'crab-agents', key: 'hiddenRun' } as const, null)
 
@@ -29,6 +29,13 @@ const S = {
   timer: null as { cancel: () => void } | null,
   colorIdx: 0,
   openedFor: null as string | null,
+  /** Agent tool calls made inside a subagent: tool_use_id → that subagent's id. */
+  spawnParent: new Map<string, string>(),
+  /** The bar never moves back within a run. */
+  shownFrac: { runId: '', frac: 0 },
+  /** Blocks each limit's bar held last time, and when it last lost some. */
+  lastBlocks: new Map<string, number>(),
+  drops: new Map<string, { at: number; from: number; to: number }>(),
 }
 
 // ---------- formatting ----------
@@ -38,7 +45,9 @@ function fmtTime(ms: number): string {
   if (s < 60) return `${s}s`
   const m = Math.floor(s / 60)
   if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`
-  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ${String(m % 60).padStart(2, '0')}m`
+  return `${Math.floor(h / 24)}d ${h % 24}h`
 }
 
 function fmtUsd(usd: number | null): string {
@@ -117,13 +126,21 @@ async function sessionCost($: $T): Promise<number | null> {
 
 async function tick($: $T): Promise<void> {
   const now = await $.clock.now()
-  const costUsd = await sessionCost($)
+  let costUsd: number | null = null
+  let limits: CrabLimit[] = []
+  try {
+    const usage = await $.session.usage()
+    costUsd = usage.cost?.usd ?? null
+    limits = usage.rateLimits.map(l => ({ kind: l.kind, percentUsed: l.percentUsed, resetsAt: l.resetsAt ?? null }))
+  } catch {
+    // keep the figures empty
+  }
   let factor = 1
   if (costUsd !== null && S.costAtLoad !== null && S.rawSinceLoad > 0.005) {
     const f = (costUsd - S.costAtLoad) / S.rawSinceLoad
     if (f > 0.2 && f < 5) factor = f
   }
-  await update($, tickA, (): CrabTick => ({ now, costUsd, factor }))
+  await update($, tickA, (prev): CrabTick => ({ now, costUsd, factor, limits: limits.length > 0 ? limits : prev.limits }))
 
   // Reconcile with the engine's own view of each agent.
   const agents = await read($, agentsA)
@@ -171,6 +188,11 @@ async function newRun($: $T): Promise<CrabRun> {
     mainTool: '',
     mainTools: 0,
     mainRawUsd: 0,
+    mainTokens: 0,
+    planTotal: 0,
+    planDone: 0,
+    stepStartedAt: now,
+    avgStepMs: 0,
   }
   await update($, runA, () => run)
   // Keep agents still at work from an earlier run; drop the finished ones.
@@ -190,6 +212,109 @@ async function hideBand($: $T, runId: string | null): Promise<void> {
   await update($, hiddenA, () => runId)
 }
 
+// ---------- progress estimate ----------
+
+type PlanChange = { total?: number; done?: number; advance?: number }
+
+/** What a task-list tool call says about the main loop's plan. */
+function planChange(e: { tool: string }): PlanChange | null {
+  const a = e as unknown as Record<string, unknown>
+  const list = (a.items ?? a.todos) as unknown
+  if (e.tool === 'TodoWrite' || /update_plan$/.test(e.tool)) {
+    if (Array.isArray(list)) {
+      const items = list as { status?: string }[]
+      return { total: items.length, done: items.filter(i => i.status === 'completed').length }
+    }
+    if (a.advance === true) return { advance: 1 }
+    if (Array.isArray(a.done)) return { advance: (a.done as unknown[]).length }
+  }
+  return null
+}
+
+async function trackPlan($: $T, change: PlanChange): Promise<void> {
+  const now = await $.clock.now()
+  await update($, runA, run => {
+    if (!run) return run
+    const total = change.total ?? run.planTotal
+    const done = Math.min(total, change.done ?? run.planDone + (change.advance ?? 0))
+    if (done === run.planDone && total === run.planTotal) return run
+    const finished = Math.max(0, done - run.planDone)
+    let avg = run.avgStepMs
+    if (finished > 0) {
+      const each = (now - run.stepStartedAt) / finished
+      const count = Math.max(1, run.planDone)
+      avg = avg === 0 ? each : (avg * count + each * finished) / (count + finished)
+    }
+    return { ...run, planTotal: total, planDone: done, avgStepMs: avg, stepStartedAt: finished > 0 ? now : run.stepStartedAt }
+  })
+}
+
+/** 0..1 how far the work is, or null when nothing says. */
+function estimateFrac(run: CrabRun, shown: CrabAgent[], now: number, working: boolean): number | null {
+  if (!working) return 1
+  const elapsed = Math.max(1, now - run.startedAt)
+  if (run.planTotal > 0) {
+    const avg = run.avgStepMs > 0 ? run.avgStepMs : run.planDone > 0 ? elapsed / run.planDone : 60_000
+    const partial = Math.min(0.9, (now - run.stepStartedAt) / avg)
+    return Math.min(0.98, (run.planDone + partial) / run.planTotal)
+  }
+  if (shown.length > 0) {
+    const finished = shown.filter(a => !isActive(a) && a.endedAt !== null)
+    const avg =
+      finished.length > 0
+        ? finished.reduce((s, a) => s + ((a.endedAt as number) - a.startedAt), 0) / finished.length
+        : 90_000
+    const sum = shown.reduce((s, a) => s + (isActive(a) ? Math.min(0.9, (now - a.startedAt) / avg) : 1), 0)
+    return Math.min(0.98, sum / shown.length)
+  }
+  return null
+}
+
+function limitLabel(kind: string): string {
+  const k = kind.toLowerCase()
+  const model = /fable/.test(k) ? 'Fable' : /opus/.test(k) ? 'Opus' : /sonnet/.test(k) ? 'Sonnet' : /haiku/.test(k) ? 'Haiku' : ''
+  if (model) return `${model} (semana)`
+  if (/five_hour|5h|session/.test(k)) return 'Sesión (5 h)'
+  if (/seven_day|week/.test(k)) return 'Semana'
+  if (/spend/.test(k)) return 'Gasto'
+  return kind
+}
+
+const BURST_MS = 2500
+
+function limitRows(limits: CrabLimit[], now: number): LimitRow[] {
+  const rows: LimitRow[] = limits.map(l => {
+    const left = Math.max(0, Math.min(100, 100 - l.percentUsed))
+    const resets = l.resetsAt ? Date.parse(l.resetsAt) : NaN
+    const when = Number.isFinite(resets) && resets > now ? `reinicia en ${fmtTime(resets - now)}` : ''
+    // Blocks that just went out burst into pixels for a moment.
+    const blocks = Math.round((left / 100) * LIMIT_BLOCKS)
+    const before = S.lastBlocks.get(l.kind)
+    if (before !== undefined && blocks < before) S.drops.set(l.kind, { at: now, from: before, to: blocks })
+    S.lastBlocks.set(l.kind, blocks)
+    const drop = S.drops.get(l.kind)
+    const lost: number[] = []
+    if (drop && now - drop.at < BURST_MS) for (let b = drop.to; b < drop.from; b++) lost.push(b)
+    return { label: limitLabel(l.kind), left, note: `${Math.round(left)}% restante${when ? ' · ' + when : ''}`, lost }
+  })
+  const order = (r: LimitRow) => (r.label.startsWith('Sesión') ? 0 : r.label === 'Semana' ? 1 : r.label.startsWith('Fable') ? 2 : 3)
+  rows.sort((a, b) => order(a) - order(b))
+  if (!rows.some(r => r.label.startsWith('Fable'))) rows.push({ label: 'Fable (semana)', left: null, note: 'sin datos de este límite' })
+  return rows
+}
+
+/** How tired main Claude looks, from what is left of the weekly limit. */
+function tiredness(limits: CrabLimit[]): number {
+  const week = limits.find(l => l.kind === 'seven_day') ?? limits.find(l => /seven_day|week/i.test(l.kind))
+  if (!week) return 0
+  const left = 100 - week.percentUsed
+  return left >= 60 ? 0 : left >= 30 ? 1 : left >= 10 ? 2 : 3
+}
+
+function propFor(type: string): CrabProp {
+  return /explore|search|research/i.test(type) ? 'magnifier' : 'laptop'
+}
+
 async function view($: $T) {
   const run = await read($, runA)
   const agents = await read($, agentsA)
@@ -202,7 +327,14 @@ async function view($: $T) {
   const elapsed = run ? (working ? now : Math.max(lastEnd, run.startedAt)) - run.startedAt : 0
   const runCost =
     run && run.costStart !== null && t.costUsd !== null ? Math.max(0, t.costUsd - run.costStart) : null
-  return { run, shown, working, anyActive, elapsed, runCost, t, now }
+  let frac = run ? estimateFrac(run, shown, now, working) : null
+  if (run && frac !== null) {
+    if (S.shownFrac.runId !== run.id) S.shownFrac = { runId: run.id, frac: 0 }
+    frac = working ? Math.max(S.shownFrac.frac, frac) : 1
+    S.shownFrac.frac = frac
+  }
+  const remaining = working && frac !== null && frac > 0.03 ? (elapsed * (1 - frac)) / frac : null
+  return { run, shown, working, anyActive, elapsed, runCost, t, now, frac, remaining }
 }
 
 export const register: Register = on => {
@@ -210,6 +342,7 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     S.costAtLoad = await sessionCost($)
+    await tick($)
     await $.command.register({
       name: 'cangrejos',
       description: 'Abre el árbol de agentes cangrejo (tareas, tiempo y costo)',
@@ -249,7 +382,7 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const agent: CrabAgent = {
       id: res.agentId,
-      parentId: e.parentAgentId ?? null,
+      parentId: e.parentAgentId ?? S.spawnParent.get(e.tool_use_id) ?? null,
       runId: run.id,
       type: e.subagentType,
       description: e.description || clip(e.prompt, 40),
@@ -274,6 +407,9 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const label = toolLabel(e)
+    if (e.agentId !== undefined && (e.tool === 'Agent' || e.tool === 'Task') && e.tool_use_id) {
+      S.spawnParent.set(e.tool_use_id, e.agentId)
+    }
     if (e.agentId !== undefined) {
       const id = e.agentId
       await update($, agentsA, list =>
@@ -281,6 +417,8 @@ export const register: Register = on => {
       )
     } else {
       await update($, runA, run => (run ? { ...run, mainTool: label, mainTools: run.mainTools + 1 } : run))
+      const change = planChange(e)
+      if (change) await trackPlan($, change)
     }
     return next(e)
   })
@@ -298,7 +436,9 @@ export const register: Register = on => {
           list.map(a => (a.id === id ? { ...a, rawUsd: a.rawUsd + raw, tokens: a.tokens + tok } : a)),
         )
       } else {
-        void update($, runA, run => (run ? { ...run, mainRawUsd: run.mainRawUsd + raw } : run))
+        void update($, runA, run =>
+          run ? { ...run, mainRawUsd: run.mainRawUsd + raw, mainTokens: run.mainTokens + tok } : run,
+        )
       }
     }
     return r
@@ -343,27 +483,33 @@ export const register: Register = on => {
           ? `Claude: ${v.run.mainTool}`
           : 'Claude pensando…'
         : '✓ trabajo terminado'
+    const pct = v.frac === null ? null : Math.round(v.frac * 100)
+    const eta = !working
+      ? '✓ listo'
+      : v.remaining === null
+        ? '⏳ calculando…'
+        : `⏳ ~${fmtTime(v.remaining)} restante`
     const summary =
-      (total > 0 ? `${done}/${total} agentes · ` : '') + `⏱ ${fmtTime(v.elapsed)} · ~${fmtUsd(v.runCost)}`
+      `${eta}${pct !== null && working ? ` · ${pct}%` : ''} · ⏱ ${fmtTime(v.elapsed)} · ~${fmtUsd(v.runCost)}` +
+      (total > 0 ? ` · ${done}/${total} agentes` : '')
     const runId = v.run.id
 
-    const segments: Segment[] = v.shown.map(a => ({ color: a.color, state: a.status as CrabState }))
     let bar: RenderNode
     if ('Svg' in table) {
       const Svg = table.Svg
       bar = (
         <Svg
-          source={progressSvg(segments, working)}
-          alt={`Progreso: ${total > 0 ? `${done} de ${total} agentes` : working ? 'trabajando' : 'listo'}`}
-          width={244}
-          height={24}
+          source={fillSvg(v.frac, working, 300, tiredness(v.t.limits))}
+          alt={`Progreso: ${pct === null ? 'calculando' : `${pct}%`}`}
+          width={300}
+          height={30}
           isInteractive
         />
       )
     } else {
       const width = Math.max(40, (e.viewport?.columns ?? 100) - 4)
       const cells = Math.min(30, Math.max(10, Math.floor(width / 4)))
-      const frac = total > 0 ? done / total : working ? 0 : 1
+      const frac = v.frac ?? 0
       const fill = Math.round(frac * cells)
       bar = (
         <Text>
@@ -399,13 +545,22 @@ export const register: Register = on => {
     const factor = v.t.factor
 
     const mainState: CrabState = S.mainBusy ? 'running' : v.anyActive ? 'waiting' : 'done'
+    // Each bar is that crab's share of this work's cost.
+    const totalRaw = (v.run?.mainRawUsd ?? 0) + v.shown.reduce((sum, a) => sum + a.rawUsd, 0)
+    const share = (raw: number) => (totalRaw > 0 ? raw / totalRaw : 0)
+    const usageText = (tok: number, raw: number, tools: number) =>
+      `${fmtTok(tok)} tok · ~${fmtUsd(raw * factor)} · ${tools} herr`
     const root: TreeNode = {
+      usage: v.run
+        ? { text: usageText(v.run.mainTokens, v.run.mainRawUsd, v.run.mainTools), frac: share(v.run.mainRawUsd) }
+        : undefined,
       id: '__main__',
       parentId: null,
       title: 'Claude',
       subtitle: S.mainBusy ? 'principal · trabajando' : v.anyActive ? 'principal · esperando' : 'principal',
       color: MAIN_COLOR,
       state: v.run ? mainState : 'idle',
+      opts: { tired: tiredness(v.t.limits) },
     }
     const nodes: TreeNode[] = v.shown.map(a => ({
       id: a.id,
@@ -414,6 +569,8 @@ export const register: Register = on => {
       subtitle: a.description,
       color: a.color,
       state: a.status as CrabState,
+      usage: { text: usageText(a.tokens, a.rawUsd, a.tools), frac: share(a.rawUsd) },
+      opts: { prop: propFor(a.type) },
     }))
 
     const ids = new Set(v.shown.map(a => a.id))
@@ -441,24 +598,60 @@ export const register: Register = on => {
     }
     walk(null)
 
+    const limits = limitRows(v.t.limits, v.now || Date.now())
+    let limitsPic: RenderNode | null = null
+    if ('Svg' in table) {
+      const Svg = table.Svg
+      limitsPic = (
+        <Box alignSelf="flex-start">
+          <Svg
+            source={limitsSvg(limits)}
+            alt={limits.map(l => `${l.label}: ${l.note}`).join('; ')}
+            width={460}
+            height={limits.length * 44}
+            isInteractive
+          />
+        </Box>
+      )
+    } else {
+      limitsPic = (
+        <Box flexDirection="column">
+          {limits.map(l => (
+            <Text key={l.label} dimColor>
+              {l.label}: {l.note}
+            </Text>
+          ))}
+        </Box>
+      )
+    }
+
     let picture: RenderNode | null = null
     if ('Svg' in table) {
       const Svg = table.Svg
       const tree = treeSvg(root, nodes)
-      const room = Math.max(240, ((e.viewport?.columns ?? 80) - 2) * 8)
+      // Drawn larger than its own units, at a fixed size: the box grows
+      // downward with each agent instead of shrinking the crabs to fit.
+      const zoom = 1.5
       picture = (
-        <Svg
-          source={tree.source}
-          alt={`Árbol de agentes: Claude y ${nodes.length} subagentes`}
-          width={Math.min(tree.width, room)}
-          isInteractive
-        />
+        <Box alignSelf="flex-start">
+          <Svg
+            source={tree.source}
+            alt={`Árbol de agentes: Claude y ${nodes.length} subagentes`}
+            width={Math.round(tree.width * zoom)}
+            height={Math.round(tree.height * zoom)}
+            isInteractive
+          />
+        </Box>
       )
     }
 
     const done = v.shown.filter(a => !isActive(a)).length
     return (
       <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column">
+          <Text bold>🕹 Uso restante</Text>
+          {limitsPic}
+        </Box>
         <Box flexDirection="column">
           <Text bold>
             {v.working ? '🦀 Trabajando' : v.run ? '🦀 Listo' : '🦀 Sin actividad todavía'}

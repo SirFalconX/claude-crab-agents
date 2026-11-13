@@ -27,6 +27,20 @@ export type CrabRun = {
   mainTool: string
   mainTools: number
   mainRawUsd: number
+  mainTokens: number
+  /** The main loop's task list (update_plan / TodoWrite), when it keeps one. */
+  planTotal: number
+  planDone: number
+  /** When the current step began. */
+  stepStartedAt: number
+  /** Average length of finished steps, ms; 0 until one finishes. */
+  avgStepMs: number
+}
+
+export type CrabLimit = {
+  kind: string
+  percentUsed: number
+  resetsAt: string | null
 }
 
 export type CrabTick = {
@@ -34,6 +48,7 @@ export type CrabTick = {
   costUsd: number | null
   /** Session cost / raw estimate, to calibrate per-agent figures. */
   factor: number
+  limits: CrabLimit[]
 }
 
 declare module 'claude-code' {
