@@ -1,0 +1,5 @@
+{
+  "name": "claude-crab-agents",
+  "owner": { "name": "SirFalconX" },
+  "plugins": [{ "name": "crab-agents", "source": "./" }]
+}
